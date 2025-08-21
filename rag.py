@@ -1,14 +1,14 @@
 # rag.py
 import os
-from typing import List, Tuple, Optional
+import requests
+from typing import Optional
 from langchain.prompts import PromptTemplate
-from langchain.chains import RetrievalQA
 from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline
-from transformers import pipeline
+from langchain_huggingface import HuggingFaceEmbeddings
+from dotenv import load_dotenv
+from pathlib import Path
 
-
-RAG_PROMPT = """You are a helpful assistant with access to EkaImpact NGO information. 
+RAG_PROMPT = """You are an FAQ BOT with access to EkaImpact NGO information. 
 Use the provided context to answer the user’s question.
 
 If the answer is not in the context, say: "I don’t know based on EkaImpact’s data."
@@ -20,20 +20,10 @@ Question: {question}
 
 Answer:"""
 
-# --- Embeddings (must match build_index.py) ---
-embedding = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
 # --- Load FAISS index ---
+embedding = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 vectorstore = FAISS.load_local("data/faiss_index", embedding, allow_dangerous_deserialization=True)
 retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
-
-# --- Hugging Face model (BART or FLAN) ---
-generator = pipeline(
-    "text2text-generation",
-    model="facebook/bart-large-cnn",   
-    max_new_tokens=400
-)
-llm = HuggingFacePipeline(pipeline=generator)
 
 # --- Custom Prompt ---
 prompt_tmpl = PromptTemplate(
@@ -41,31 +31,41 @@ prompt_tmpl = PromptTemplate(
     template=RAG_PROMPT
 )
 
-# --- Build QA chain ---
-qa = RetrievalQA.from_chain_type(
-    llm=llm,
-    retriever=retriever,
-    chain_type="stuff",
-    chain_type_kwargs={"prompt": prompt_tmpl}
-)
+def answer_question(question: str, mistral_api_key: str, model: str = "mistral-small-latest") -> str:
+    """
+    Ask a question using Mistral API directly (no client lib).
+    """
+    # 1. Retrieve relevant docs
+    docs = retriever.invoke(question)
+    context = "\n\n".join([doc.page_content for doc in docs])
 
-# --- Main function ---
-def answer_question(question: str) -> str:
-    """
-    Ask a question to the RAG pipeline.
-    - `question`: user query
-    """
-    result = qa.invoke({"query": question})
-    return result["result"]
+    # 2. Format prompt
+    prompt = RAG_PROMPT.format(context=context, question=question)
+    
+
+    # 3. Call mistral API directly
+    url = "https://api.mistral.ai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {mistral_api_key}", "Content-Type": "application/json"}
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You are an assistant answering FAQs."},
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 400
+    }
+
+    resp = requests.post(url, headers=headers, json=payload)
+    if resp.status_code != 200:
+        raise RuntimeError(f"API Error {resp.status_code}: {resp.text}")
+
+    result = resp.json()
+    return result["choices"][0]["message"]["content"]
 
 # --- Script entry ---
 if __name__ == "__main__":
+    load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
+    key= os.getenv("MISTRAL_API_KEY") 
+    
     q = input("Question: ")
-    print("Answer:", answer_question(q))
-
-
-
-
-
-
-
+    print("Answer:", answer_question(q, mistral_api_key=key))
