@@ -1,4 +1,4 @@
-# build_index.py
+
 
 import os
 from langchain_text_splitters import RecursiveCharacterTextSplitter
